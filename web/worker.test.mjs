@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 import worker from "./worker.js";
 import { resetAccessKeyCache } from "./access.js";
+import { memoryBucket } from "./test-bucket.mjs";
 
 const TEAM = "team.cloudflareaccess.com";
 const AUD = "app-aud-tag";
@@ -138,4 +139,69 @@ test("rejects path tricks and other methods", async () => {
 test("local development can opt out of the login", async () => {
     const response = await get("/c3data/manifest.json", env({ ACCESS_TEAM_DOMAIN: "", ACCESS_AUD: "", ALLOW_PUBLIC_DATA: "true" }));
     assert.equal(response.status, 200);
+});
+
+// ---- cloud saves ------------------------------------------------------------------------------------------------
+
+const savesEnv = () => env({ C3_DATA: memoryBucket() });
+const as = async email => ({ "Cf-Access-Jwt-Assertion": await makeToken({ email }), "X-Augustus-Cloud": "1" });
+const put = async (e, name, body, headers) => worker.fetch(new Request("https://augustus.example/cloud/saves/" + encodeURIComponent(name),
+    { method: "PUT", body, headers }), e);
+const NONE = { "X-Save-Base": "none" };
+
+test("cloud saves need a login", async () => {
+    const e = savesEnv();
+    assert.equal((await get("/cloud/saves", e)).status, 403);
+    assert.equal((await put(e, "a.sav", "x", NONE)).status, 403);
+});
+
+test("cloud saves are kept per player", async () => {
+    const e = savesEnv();
+    assert.equal((await put(e, "Rome.sav", "adam's", { ...(await as("Adam@Example.com")), ...NONE })).status, 200);
+    const mine = await (await get("/cloud/saves", e, await as("adam@example.com"))).json();
+    assert.equal(mine.user, "adam@example.com");
+    assert.deepEqual(mine.files.map(f => f.name), ["Rome.sav"]);
+    assert.equal(mine.files[0].hash.length, 64);
+    const theirs = await (await get("/cloud/saves", e, await as("someone@example.com"))).json();
+    assert.deepEqual(theirs.files, []);
+    assert.equal((await get("/cloud/saves/Rome.sav", e, await as("someone@example.com"))).status, 404);
+    const file = await get("/cloud/saves/Rome.sav", e, await as("adam@example.com"));
+    assert.equal(await file.text(), "adam's");
+    assert.equal(file.headers.get("X-Save-Hash"), mine.files[0].hash);
+});
+
+test("cloud save uploads refuse to overwrite a version they have not seen", async () => {
+    const e = savesEnv();
+    const h = await as("adam@example.com");
+    const first = await (await put(e, "Rome.sav", "v1", { ...h, ...NONE })).json();
+    // A second device that never saw v1 cannot replace it
+    assert.equal((await put(e, "Rome.sav", "other", { ...h, ...NONE })).status, 409);
+    assert.equal((await put(e, "Rome.sav", "other", { ...h, "X-Save-Base": "0".repeat(64) })).status, 409);
+    // Uploading the same content again is fine, and so is replacing the version that was seen
+    assert.equal((await put(e, "Rome.sav", "v1", { ...h, ...NONE })).status, 200);
+    assert.equal((await put(e, "Rome.sav", "v2", { ...h, "X-Save-Base": first.hash })).status, 200);
+    assert.equal((await put(e, "Rome.sav", "v2", { ...h })).status, 400);
+});
+
+test("cloud save deletes go to the trash and need the current version", async () => {
+    const bucket = memoryBucket();
+    const e = env({ C3_DATA: bucket });
+    const h = await as("adam@example.com");
+    const stored = await (await put(e, "Rome.sav", "v1", { ...h, ...NONE })).json();
+    assert.equal((await get("/cloud/saves/Rome.sav", e, { ...h, "X-Save-Base": "0".repeat(64) }, "DELETE")).status, 409);
+    assert.equal((await get("/cloud/saves/Rome.sav", e, { ...h, "X-Save-Base": stored.hash }, "DELETE")).status, 200);
+    const keys = [...bucket.objects.keys()];
+    assert.equal(keys.length, 1);
+    assert.match(keys[0], /^saves\/adam%40example\.com\/trash\/.* Rome\.sav$/);
+});
+
+test("cloud saves only accept save file names and the anti-forgery header", async () => {
+    const e = savesEnv();
+    const h = await as("adam@example.com");
+    for (const name of ["evil.exe", ".hidden.sav", "a/b.sav", "..\\x.sav", " space.sav"]) {
+        assert.equal((await put(e, name, "x", { ...h, ...NONE })).status, 400, name);
+    }
+    const { ["X-Augustus-Cloud"]: _, ...noHeader } = h;
+    assert.equal((await put(e, "Rome.sav", "x", { ...noHeader, ...NONE })).status, 403);
+    assert.equal((await put(e, "Rome.svx", "", { ...h, ...NONE })).status, 400);
 });

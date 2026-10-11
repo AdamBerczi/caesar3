@@ -37,8 +37,8 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Test the Worker
-        run: node --test web/worker.test.mjs
+      - name: Test the Worker and cloud save sync
+        run: node --test web/worker.test.mjs web/cloud-sync.test.mjs
 
       - name: Cache Emscripten
         uses: actions/cache@v4
@@ -70,6 +70,7 @@ jobs:
           mkdir -p web/dist
           cp build/augustus.html web/dist/index.html
           cp build/augustus.js build/augustus.wasm build/augustus.data web/dist/
+          cp web/cloud-sync.js web/dist/
           cp web/_headers web/dist/_headers
           # Cloudflare serves every static file up to 25 MiB
           find web/dist -type f -size +25M -print -exec false {} +

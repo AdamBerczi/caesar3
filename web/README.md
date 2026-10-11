@@ -13,6 +13,7 @@ browser ──► Worker "augustus" ──► static build (web/dist)           
   game files from `/c3data/` into the browser's IndexedDB the first time, then reuses them. If that is unavailable the
   player can still pick the Caesar III folder or a zip by hand, exactly as in the upstream build.
 * `web/worker.js` serves the static build and the game data, `web/access.js` checks the Access login token.
+* **Cloud saves**: `web/saves.js` (the `/cloud/saves` API) and `web/cloud-sync.js` (the page side), see below.
 * The canvas fills the page and follows every resize, so a host page can resize the frame freely.
 
 ## One-time setup
@@ -40,6 +41,27 @@ browser ──► Worker "augustus" ──► static build (web/dist)           
 Open the site: the first start downloads the files (a few minutes at most, shown with a progress bar), every later
 start is local. "Re-download game data" on the start screen repairs a damaged copy; saves are never touched by it.
 
+## Cloud saves
+
+Saved games (`.sav`, `.svx`, `.map` in the game folder) follow the player across browsers and devices. Settings
+(`augustus.ini`, `c3.inf`) stay per browser, since they hold things like the window layout.
+
+* The game only ever reads and writes the browser's own copy, so saving is instant and works offline. The page syncs
+  in the background: a moment after every save, every minute, when the network comes back and when the tab is shown.
+* Each player's saves live in the same private bucket under `saves/<access email>/files/`. The folder comes from
+  the verified Access login, so nobody can reach another player's saves.
+* Sync compares content hashes with the version both sides had last time (kept in `.augustus-cloud.json` next to
+  the saves). A change on one side is copied to the other. If a save was changed in two places, **both are kept**:
+  the newer one under the original name, the other as `<name> (conflict <date>).sav`, and the page shows a notice.
+* A deleted save is deleted on the other devices too, but the cloud copy moves to `saves/<email>/trash/`, from where
+  it can be restored in the R2 dashboard. "Delete all files" on the start screen only clears this browser: the cloud
+  saves come back on the next sync.
+* An expired login pauses syncing (the start screen says so) until the page is reloaded. Nothing local is touched.
+* "Download Saves" / "Import Saves" work as before; imported saves are uploaded like any other.
+
+API (all behind Access): `GET /cloud/saves` lists, `GET|PUT|DELETE /cloud/saves/<name>` with `X-Save-Base: <hash of
+the version last seen | none>`; a mismatch answers 409, so an outdated browser can never overwrite a newer save.
+
 ## Embedding
 
 Put the site in an `<iframe allow="fullscreen" src="https://augustus.<subdomain>.workers.dev/">` and resize the
@@ -54,6 +76,11 @@ localhost (see `HostBridge.trusted` in `gen/shell.html.in`; the same list is in 
 | host → game | `flush` | write saves to browser storage now; answered by `flushed` `{ ok }` before closing |
 | game → host | `hello` `{ version }` | the bridge is ready |
 | game → host | `state` `{ state }` | `ready`, `running`, `quit`, `needs-data` or `busy` (open in another tab) |
+| game → host | `cloud` `{ state, message }` | cloud save sync: `syncing`, `synced`, `offline`, `signed-out` or `error` |
+
+Cloudflare Access's sign-in page refuses to be framed (`X-Frame-Options: DENY`), so the frame only works once the
+browser holds a login for this hostname. A host page should treat a missing `hello` as "not signed in" and offer to
+open the game in a new tab to sign in, then reload the frame (the homepage window does this).
 
 ## Local development
 
@@ -62,7 +89,7 @@ source emsdk/emsdk_env.sh && export EMSDK=$PWD/emsdk
 ./.ci_scripts/pack_assets.sh
 mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=Release -DTARGET_PLATFORM=emscripten -DEMSCRIPTEN_HOSTED=ON ..
 make -j4
-node --test web/worker.test.mjs     # Worker and Access token checks
+node --test web/worker.test.mjs web/cloud-sync.test.mjs     # Worker, Access token and cloud save sync checks
 ```
 
 The stock single-file build (`-DEMSCRIPTEN_HOSTED=OFF`, the default) is unchanged apart from the resizing and

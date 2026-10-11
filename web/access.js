@@ -51,44 +51,53 @@ function readToken(request) {
 /**
  * @returns {Promise<boolean>} true only for an unexpired token signed by the team's keys for this application
  */
-export async function verifyAccessRequest(request, { team, audience }, fetchFn = fetch, nowSeconds = Date.now() / 1000) {
+export async function verifyAccessRequest(request, options, fetchFn = fetch, nowSeconds = Date.now() / 1000) {
+    return (await verifyAccessIdentity(request, options, fetchFn, nowSeconds)) !== null;
+}
+
+/**
+ * @returns {Promise<object|null>} the token's claims (email, sub, ...) only for an unexpired token signed by the team's
+ * keys for this application, null otherwise
+ */
+export async function verifyAccessIdentity(request, { team, audience }, fetchFn = fetch, nowSeconds = Date.now() / 1000) {
     const token = readToken(request);
     if (!token) {
-        return false;
+        return null;
     }
     const parts = token.split(".");
     if (parts.length !== 3) {
-        return false;
+        return null;
     }
     try {
         const header = parseJson(base64UrlToBytes(parts[0]));
         const payload = parseJson(base64UrlToBytes(parts[1]));
         if (header.alg !== "RS256") {
-            return false;
+            return null;
         }
         if (payload.iss !== "https://" + team) {
-            return false;
+            return null;
         }
         const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
         if (!audiences.includes(audience)) {
-            return false;
+            return null;
         }
         if (typeof payload.exp !== "number" || payload.exp <= nowSeconds) {
-            return false;
+            return null;
         }
         if (typeof payload.nbf === "number" && payload.nbf > nowSeconds + 60) {
-            return false;
+            return null;
         }
         const keys = await getKeys(team, fetchFn);
         const jwk = keys.find(key => key.kid === header.kid);
         if (!jwk) {
-            return false;
+            return null;
         }
         const key = await crypto.subtle.importKey("jwk", jwk,
             { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
-        return await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, base64UrlToBytes(parts[2]),
+        const valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, base64UrlToBytes(parts[2]),
             new TextEncoder().encode(parts[0] + "." + parts[1]));
+        return valid ? payload : null;
     } catch (error) {
-        return false;
+        return null;
     }
 }

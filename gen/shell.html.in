@@ -249,6 +249,33 @@
         border-width: 37px 0px 37px 74px;
       }
 
+      div#cloudStatus {
+        font-size: 10pt;
+        font-weight: normal;
+        margin-top: 6pt;
+        min-height: 1.2em;
+      }
+
+      div#cloudStatus.problem {
+        color: rgb(170, 60, 40);
+      }
+
+      #cloudToast {
+        display: none;
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        max-width: min(420px, calc(100% - 32px));
+        z-index: 3;
+        border: 1px solid rgb(120, 120, 120);
+        border-radius: 4px;
+        background-color: rgba(20, 20, 20, 0.85);
+        color: rgb(230, 230, 230);
+        font: 10pt Tahoma, Verdana, sans-serif;
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+
       #OSD {
         display: none;
         position: absolute;
@@ -279,15 +306,17 @@
           <input type="button" id="importSaves" onclick="Module.clickImportSaves()" value="Import Saves">
           <input type="button" id="redownload" onclick="Module.redownloadGameData()" value="Re-download game data">
           <input type="button" class="red" onclick="Module.showSubWindow(confirmElement)" value="Delete all files">
+          <div id="cloudStatus"></div>
         </div>
         <div id="confirm">
-          <div>Are you sure you want to delete all files?<br><br>You will lose all your savegames</div>
+          <div>Are you sure you want to delete all files?<br><br>You will lose all your savegames<span id="cloudKeepsNote"><br><br><small>Saves in the cloud are kept and come back on the next sync</small></span></div>
           <input type="button" class="red" onclick="Module.clearFS()" value="YES">
           <input type="button" onclick="Module.showSubWindow(startOptionsElement)" value="No">          
         </div>
       </div>
       <div class="version">v@PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@@VERSION_REVISION@ &middot; <a href="@AUGUSTUS_SOURCE_URL@" target="_blank" rel="noopener">Source code (AGPL-3.0)</a></div>
     </div>
+    <div id="cloudToast" role="status" title="Click to dismiss"></div>
     <div id="OSD">
       <span id="OSDSpinner" class="spinner small"></span>
       <span id="OSDStatus"></span>
@@ -307,6 +336,8 @@
       ];
       // Files that belong to the player and must survive a game data re-import
       var PRESERVED_EXTENSIONS = ['.sav', '.svx', '.map', '.ini', '.inf'];
+      // Remembers which version of each save is already in the cloud (hosted build), kept with the saves
+      var CLOUD_BASE_FILE = '.augustus-cloud.json';
       var SAVE_EXTENSIONS = ['.sav', '.svx', '.map'];
 
       var infoElement = document.getElementById('infoLocation');
@@ -537,7 +568,10 @@
               break;
             case 'augustus:flush':
               FS.syncfs(false, function(err) {
-                HostBridge.send('flushed', { ok: !err });
+                // Give the cloud a short moment too; whatever does not make it is uploaded on the next visit
+                Cloud.flush(3000).then(function() {
+                  HostBridge.send('flushed', { ok: !err });
+                });
               });
               break;
           }
@@ -575,6 +609,127 @@
           return new Promise(function() {}); // hold the lock until the page is closed
         });
       }
+      // Cloud saves (hosted build only): web/cloud-sync.js does the work, this wires it to the page and the game's files
+      var CLOUD_LABELS = {
+        syncing: 'Cloud saves: syncing...',
+        synced: 'Cloud saves: up to date',
+        offline: 'Cloud saves: offline, saves stay in this browser and sync later',
+        'signed-out': 'Cloud saves paused: your sign-in expired, reload the page to sign in again',
+        error: 'Cloud saves: last sync failed, retrying in a minute'
+      };
+      var Cloud = {
+        engine: null,
+        statusElement: document.getElementById('cloudStatus'),
+        toastElement: document.getElementById('cloudToast'),
+        toastTimer: null,
+        start: function() {
+          if (!HOSTED || Cloud.engine || Cloud.loading) {
+            return;
+          }
+          Cloud.loading = true;
+          var script = document.createElement('script');
+          script.src = 'cloud-sync.js';
+          script.onload = function() {
+            Cloud.engine = CloudSync.create({
+              url: 'cloud/saves',
+              fetch: window.fetch.bind(window),
+              fs: Cloud.files,
+              isOnline: function() { return navigator.onLine !== false; },
+              onStatus: Cloud.onStatus,
+              onNotice: Cloud.toast
+            });
+            Cloud.engine.start();
+          };
+          script.onerror = function() {
+            Cloud.onStatus('error', { message: 'could not load the sync code' });
+          };
+          document.head.appendChild(script);
+        },
+        // Called whenever the game wrote or deleted files
+        changed: function() {
+          if (Cloud.engine) {
+            Cloud.engine.schedule();
+          }
+        },
+        // Resolves when a sync finished, or after the timeout, whichever comes first
+        flush: function(timeout) {
+          if (!Cloud.engine) {
+            return Promise.resolve();
+          }
+          return Promise.race([
+            Cloud.engine.sync(),
+            new Promise(function(resolve) { setTimeout(resolve, timeout); })
+          ]);
+        },
+        onStatus: function(state, detail) {
+          var text = CLOUD_LABELS[state] || '';
+          if (state === 'synced' && detail.at) {
+            text += ' (' + detail.count + ' save' + (detail.count === 1 ? '' : 's') + ', ' +
+              detail.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')';
+          }
+          if (state === 'error' && detail.message) {
+            text += ': ' + detail.message;
+          }
+          Cloud.statusElement.textContent = text;
+          Cloud.statusElement.className = state === 'synced' || state === 'syncing' ? '' : 'problem';
+          if (state === 'signed-out' && Module.running) {
+            Cloud.toast(CLOUD_LABELS[state] + '. Your saves are safe in this browser.');
+          }
+          HostBridge.send('cloud', { state: state, message: text });
+        },
+        toast: function(message) {
+          var element = Cloud.toastElement;
+          element.textContent = message;
+          element.style.display = 'block';
+          element.onclick = function() { element.style.display = 'none'; };
+          clearTimeout(Cloud.toastTimer);
+          Cloud.toastTimer = setTimeout(function() { element.style.display = 'none'; }, 15000);
+        },
+        // The game folder as cloud-sync.js sees it: only the files directly inside it
+        files: {
+          path: function(name) {
+            return C3Dir + '/' + name;
+          },
+          list: function() {
+            return Object.keys(FS.lookupPath(C3Dir).node.contents).map(function(name) {
+              var stat = FS.stat(C3Dir + '/' + name);
+              return FS.isFile(stat.mode) ? { name: name, size: stat.size, mtime: stat.mtime.getTime() } : null;
+            }).filter(Boolean);
+          },
+          read: function(name) {
+            return FS.readFile(Cloud.files.path(name), { encoding: 'binary' });
+          },
+          write: function(name, bytes, mtime) {
+            FS.writeFile(Cloud.files.path(name), bytes, { encoding: 'binary' });
+            if (mtime && FS.utime) {
+              FS.utime(Cloud.files.path(name), mtime, mtime);
+            }
+          },
+          remove: function(name) {
+            FS.unlink(Cloud.files.path(name));
+          },
+          readText: function(name) {
+            try {
+              return FS.readFile(Cloud.files.path(name), { encoding: 'utf8' });
+            } catch (e) {
+              return null;
+            }
+          },
+          writeText: function(name, text) {
+            FS.writeFile(Cloud.files.path(name), text);
+          },
+          persist: function() {
+            return new Promise(function(resolve) {
+              FS.syncfs(false, function(err) {
+                if (err) {
+                  console.error(err);
+                }
+                resolve();
+              });
+            });
+          }
+        }
+      };
       var BrowserSupport = {
         hasZip: false,
         canDownloadSaves: false,
@@ -763,6 +918,8 @@
           }
           if (!HOSTED) {
             document.getElementById('redownload').style.display = 'none';
+            document.getElementById('cloudStatus').style.display = 'none';
+            document.getElementById('cloudKeepsNote').style.display = 'none';
           }
           watchCanvasSize();
           canvasElement.addEventListener('pointerdown', function() {
@@ -817,6 +974,7 @@
                 Module.handleFSError(err);
                 return;
               }
+              Cloud.start();
               if (Module.missingGameFiles().length > 0) {
                 if (HOSTED) {
                   Module.downloadGameData();
@@ -856,6 +1014,7 @@
               Module.showFirstScreen();
             }
             Module.clearOSD();
+            Cloud.changed();
           });                
         },
         // Deletes everything inside path. With keepSaves, the player's own files (saves, maps and settings)
@@ -870,7 +1029,7 @@
               } catch (e) {
                 // The folder still holds files that were kept
               }
-            } else if (!keepSaves || !hasExtension(element, PRESERVED_EXTENSIONS)) {
+            } else if (!keepSaves || !(hasExtension(element, PRESERVED_EXTENSIONS) || element === CLOUD_BASE_FILE)) {
               FS.unlink(path + '/' + element);
             }
           });
@@ -1064,6 +1223,7 @@
             }
             Module.setStatus('Syncing filesystem, please wait...');
             FS.syncfs(false, function() {
+              Cloud.changed();
               Module.setStatus('Imported ' + pending.length + ' save file(s)<br><br>' +
                 '<small>(Click to exit this prompt)</small>');
               addInfoElementClickEvent(clickShowMainWindow);
@@ -1078,6 +1238,9 @@
         },
         clearFS: function() {
           Module.setStatus("Deleting filesystem contents...");
+          if (Cloud.engine) {
+            Cloud.engine.forget();
+          }
           Module.clearPath(C3Dir);
           FS.syncfs(false, function(err) {
             Module.setStatus("Filesystem deleted<br><br>" + Module.addFilesMessage);
