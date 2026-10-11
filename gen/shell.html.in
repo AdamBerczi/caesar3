@@ -518,7 +518,7 @@
             /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
         },
         init: function() {
-          if (window.parent === window) {
+          if (window.parent === window || HostBridge.origin) {
             return;
           }
           var origin = null;
@@ -567,6 +567,10 @@
               canvasElement.focus();
               break;
             case 'augustus:flush':
+              if (!Module.runtimeReady) {
+                HostBridge.send('flushed', { ok: true });
+                break;
+              }
               FS.syncfs(false, function(err) {
                 // Give the cloud a short moment too; whatever does not make it is uploaded on the next visit
                 Cloud.flush(3000).then(function() {
@@ -1498,6 +1502,9 @@
           Module.loadDirFromZipFile(files[0]);
         }
       };
+      // Say hello as soon as this page has loaded, long before the game itself has: the host uses it to tell a
+      // loading game apart from a frame that the sign-in page refused to show
+      HostBridge.init();
       window.onerror = function(error) {
         Module.setStatus("Unhandled error:<br><br>" + error + "<br><br>Please click to refresh your browser");
         addInfoElementClickEvent(function() {
