@@ -58,3 +58,5 @@ ext/SDL2/*.zip
 ext/SDL2/*.tar.gz
 
 res/augustus.icns
+/web/dist/
+.wrangler/

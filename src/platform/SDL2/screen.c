@@ -126,6 +126,11 @@ int platform_screen_create(const char *title, int display_scale_percentage, int 
 
     int width, height;
     int fullscreen = system_is_fullscreen_only() ? 1 : setting_fullscreen();
+#ifdef __EMSCRIPTEN__
+    // Browsers only allow fullscreen from a user gesture, and a stale fullscreen flag would stop SDL from following
+    // page resizes. Always start windowed, the page decides the window size.
+    fullscreen = 0;
+#endif
     if (fullscreen) {
         SDL_DisplayMode mode;
         SDL_GetDesktopDisplayMode(display_id, &mode);
@@ -206,7 +211,13 @@ int platform_screen_resize(int pixel_width, int pixel_height, int save)
     int logical_height = scale_pixels_to_logical(pixel_height);
 
     if (save) {
+#ifdef __EMSCRIPTEN__
+        // The user can leave fullscreen with Esc, outside of the game's control
+        int is_fullscreen = (SDL_GetWindowFlags(SDL.window) & SDL_WINDOW_FULLSCREEN) != 0;
+        setting_set_display(is_fullscreen, logical_width, logical_height);
+#else
         setting_set_display(setting_fullscreen(), logical_width, logical_height);
+#endif
     }
 
     if (!platform_renderer_create_render_texture(logical_width, logical_height)) {
@@ -301,7 +312,10 @@ void platform_screen_set_windowed(void)
     int display = SDL_GetWindowDisplayIndex(SDL.window);
     SDL_Log("User to windowed %d x %d on display %d", pixel_width, pixel_height, display);
     SDL_SetWindowFullscreen(SDL.window, 0);
+#ifndef __EMSCRIPTEN__
+    // In the browser the page decides the window size, SDL picks it up from the canvas
     SDL_SetWindowSize(SDL.window, pixel_width, pixel_height);
+#endif
     if (window_pos.centered) {
         platform_screen_center_window();
     }
@@ -314,6 +328,12 @@ void platform_screen_set_window_size(int logical_width, int logical_height)
     if (system_is_fullscreen_only()) {
         return;
     }
+#ifdef __EMSCRIPTEN__
+    // The page owns the canvas size, changing it from here would desync the canvas and the mouse position
+    (void) logical_width;
+    (void) logical_height;
+    return;
+#endif
     int pixel_width = scale_logical_to_pixels(logical_width);
     int pixel_height = scale_logical_to_pixels(logical_height);
     int display = SDL_GetWindowDisplayIndex(SDL.window);

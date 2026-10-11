@@ -1,4 +1,7 @@
 #include "SDL.h"
+#ifdef __EMSCRIPTEN__
+#include "SDL_mixer.h"
+#endif
 
 #include "core/config.h"
 #include "core/encoding.h"
@@ -8,6 +11,7 @@
 #include "core/time.h"
 #include "game/game.h"
 #include "game/settings.h"
+#include "game/state.h"
 #include "game/system.h"
 #include "graphics/screen.h"
 #include "graphics/window.h"
@@ -105,6 +109,12 @@ void system_exit(void)
 
 void system_resize(int width, int height)
 {
+#ifdef __EMSCRIPTEN__
+    // The page owns the canvas size in the browser
+    (void) width;
+    (void) height;
+    return;
+#endif
     static int s_width;
     static int s_height;
 
@@ -403,6 +413,32 @@ static void teardown(void)
 #endif
 }
 
+#ifdef __EMSCRIPTEN__
+// Called by the hosting page (through the shell's postMessage bridge) when the game is minimized or hidden.
+// Stops the frame loop, the game clock and the audio, and restores exactly what it stopped on resume.
+EMSCRIPTEN_KEEPALIVE void augustus_host_set_paused(int paused)
+{
+    static int paused_by_host;
+    static int game_was_already_paused;
+    if (paused && !paused_by_host) {
+        paused_by_host = 1;
+        game_was_already_paused = game_state_is_paused();
+        game_state_pause();
+        Mix_Pause(-1);
+        Mix_PauseMusic();
+        emscripten_pause_main_loop();
+    } else if (!paused && paused_by_host) {
+        paused_by_host = 0;
+        if (!game_was_already_paused) {
+            game_state_unpause();
+        }
+        Mix_Resume(-1);
+        Mix_ResumeMusic();
+        emscripten_resume_main_loop();
+    }
+}
+#endif
+
 static void main_loop(void)
 {
     SDL_Event event;
@@ -428,7 +464,13 @@ static void main_loop(void)
     if (data.active) {
         run_and_draw();
     } else {
+#ifdef __EMSCRIPTEN__
+        // Blocking here would freeze the browser's main thread, so no event could ever wake us up again.
+        // The browser stops calling the main loop on its own while the page is hidden.
+        return;
+#else
         SDL_WaitEvent(NULL);
+#endif
     }
 }
 

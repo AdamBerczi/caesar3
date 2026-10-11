@@ -148,7 +148,12 @@ int game_init(void)
     if (missing_assets) {
         actions |= ACTION_SHOW_MESSAGE_MISSING_EXTRA_ASSETS;
     }
+#ifdef __EMSCRIPTEN__
+    // The browser build always stores user data in the IDBFS mount; there is nothing to configure.
+    if (0) {
+#else
     if (config_must_configure_user_directory()) {
+#endif
         actions |= ACTION_SETUP_USER_DIR;
     } else if (!platform_file_manager_is_directory_writeable(pref_user_dir())) {
         actions |= ACTION_SHOW_MESSAGE_USER_DIR_NOT_WRITABLE;

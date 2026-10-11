@@ -8,25 +8,31 @@
     <script async src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.4/FileSaver.min.js"></script>
     <script async src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
-      body {
+      html, body {
         background: black;
-        margin: auto;
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
       }
 
-      /* the canvas *must not* have any border or padding, or mouse coords will be wrong */
+      /* The canvas must fill the whole page and *must not* have any border or padding. SDL reads the canvas
+         CSS size and follows it on every resize, which is what lets Augustus relayout its UI for any window size.
+         It must not be scaled or translated with CSS either, or mouse coordinates will be wrong. */
       canvas {
-        border: 0px none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        border: 0 none;
+        padding: 0;
         background-color: black;
-      }
-
-      canvas {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        border: 0;
         image-rendering: pixelated;
         image-rendering: crisp-edges;
-        transform: translate(-50%, -50%);
+        outline: none;
         z-index: 1;
       }
 
@@ -97,6 +103,7 @@
         flex-direction: column;
         align-items: center; 
         font: bold 15pt Tahoma, Verdana, sans-serif;
+        overflow: auto;
         z-index: 2;
       }
 
@@ -140,6 +147,25 @@
       div#infoLocation h1 small {
         font-style: italic;
         font-weight: 100;
+      }
+
+      @media (max-width: 720px), (max-height: 540px) {
+        div#infoLocation {
+          margin: 6px;
+          border-width: 4px;
+          border-radius: 12px;
+          font-size: 11pt;
+        }
+        div#infoLocation div#middleElement {
+          top: 0;
+        }
+        #play {
+          padding: 10pt;
+        }
+        #play::before {
+          margin-bottom: 6pt;
+          border-width: 22px 0px 22px 44px;
+        }
       }
 
       progress {
@@ -250,6 +276,8 @@
         <div id="startOptions">
           <div id="play" onclick="Module.startGame()">Play Augustus</div>
           <input type="button" id="downloadSaves" onclick="Module.downloadSaves()" value="Download Saves">
+          <input type="button" id="importSaves" onclick="Module.clickImportSaves()" value="Import Saves">
+          <input type="button" id="redownload" onclick="Module.redownloadGameData()" value="Re-download game data">
           <input type="button" class="red" onclick="Module.showSubWindow(confirmElement)" value="Delete all files">
         </div>
         <div id="confirm">
@@ -258,16 +286,28 @@
           <input type="button" onclick="Module.showSubWindow(startOptionsElement)" value="No">          
         </div>
       </div>
-      <div class="version">v@PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@@VERSION_REVISION@</div>
+      <div class="version">v@PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@@VERSION_REVISION@ &middot; <a href="@AUGUSTUS_SOURCE_URL@" target="_blank" rel="noopener">Source code (AGPL-3.0)</a></div>
     </div>
     <div id="OSD">
       <span id="OSDSpinner" class="spinner small"></span>
       <span id="OSDStatus"></span>
     </div>
     <input type="file" id="loaddir" name="fileList" webkitdirectory multiple>
+    <input type="file" id="loadsaves" accept=".zip,.sav,.svx,.map" multiple style="display: none">
     <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
     <script type='text/javascript'>
       var C3Dir = '/C3';
+      // True for the hosted build, where the game data is downloaded from the site's own private storage
+      var HOSTED = @EMSCRIPTEN_HOSTED_JS@;
+      var DATA_URL = 'c3data/';
+      // Groups of file names (case-insensitive, in the game folder root) of which at least one must exist
+      var REQUIRED_FILES = [
+        ['c3.eng', 'c3_mm.eng'], ['c3.sg2'], ['c3.555'], ['c3_north.sg2'], ['c3_north.555'],
+        ['c3_south.sg2'], ['c3_south.555'], ['c3.emp']
+      ];
+      // Files that belong to the player and must survive a game data re-import
+      var PRESERVED_EXTENSIONS = ['.sav', '.svx', '.map', '.ini', '.inf'];
+      var SAVE_EXTENSIONS = ['.sav', '.svx', '.map'];
 
       var infoElement = document.getElementById('infoLocation');
       var statusElement = document.getElementById('status');
@@ -282,6 +322,8 @@
       var OSDElement = document.getElementById('OSD');
       var OSDSpinnerElement = document.getElementById('OSDSpinner');
       var OSDStatusElement = document.getElementById('OSDStatus');
+      var canvasElement = document.getElementById('canvas');
+      var saveInputElement = document.getElementById('loadsaves');
 
       var filesRead;
       var totalFiles;
@@ -291,6 +333,23 @@
         Module.loadDirFromInput(event.target.files);
       }, false);
 
+      saveInputElement.addEventListener('change', function(event) {
+        if (event.target.files.length) {
+          Module.importSaveFiles(event.target.files);
+        }
+      }, false);
+      // Write pending changes to the browser storage whenever the page is left or hidden
+      function flushOnExit() {
+        if (Module.runtimeReady) {
+          Module.syncFS();
+        }
+      }
+      window.addEventListener('pagehide', flushOnExit);
+      document.addEventListener('visibilitychange', function() {
+        if (document.hidden) {
+          flushOnExit();
+        }
+      });
       function clickSelectFile() {
         dirElement.click();
       }
@@ -387,6 +446,135 @@
       }
 
 
+      function hasExtension(name, extensions) {
+        var lower = name.toLowerCase();
+        for (var i = 0; i < extensions.length; i++) {
+          if (lower.endsWith(extensions[i])) {
+            return true;
+          }
+        }
+        return false;
+      }
+      // Names are the lower case names of the files present in the game folder root
+      function findMissing(names) {
+        var missing = [];
+        REQUIRED_FILES.forEach(function(group) {
+          if (!group.some(function(name) { return names[name]; })) {
+            missing.push(group.join(' or '));
+          }
+        });
+        return missing;
+      }
+      function ensureDirs(fullPath) {
+        var parts = fullPath.split('/');
+        var current = '';
+        for (var i = 0; i < parts.length - 1; i++) {
+          current += '/' + parts[i];
+          try {
+            FS.mkdir(C3Dir + current, 0o777);
+          } catch (e) {
+            // already exists
+          }
+        }
+      }
+      // Communication with the page that embeds the game (the home page's window manager).
+      // Messages are only exchanged with the page that is actually embedding us, and only if it is trusted.
+      var HostBridge = {
+        origin: null,
+        trusted: function(origin) {
+          return origin === location.origin ||
+            /^https:\/\/([a-z0-9-]+\.)*adam-berczi\.workers\.dev$/.test(origin) ||
+            /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+        },
+        init: function() {
+          if (window.parent === window) {
+            return;
+          }
+          var origin = null;
+          if (location.ancestorOrigins && location.ancestorOrigins.length) {
+            origin = location.ancestorOrigins[0];
+          } else if (document.referrer) {
+            try { origin = new URL(document.referrer).origin; } catch (e) { origin = null; }
+          }
+          if (!origin || !HostBridge.trusted(origin)) {
+            return;
+          }
+          HostBridge.origin = origin;
+          window.addEventListener('message', HostBridge.onMessage, false);
+          HostBridge.send('hello', { version: 1 });
+        },
+        send: function(type, detail) {
+          if (!HostBridge.origin) {
+            return;
+          }
+          var message = { type: 'augustus:' + type };
+          if (detail) {
+            for (var key in detail) {
+              message[key] = detail[key];
+            }
+          }
+          window.parent.postMessage(message, HostBridge.origin);
+        },
+        setPaused: function(paused) {
+          if (Module.running) {
+            Module.ccall('augustus_host_set_paused', null, ['number'], [paused ? 1 : 0]);
+          }
+        },
+        onMessage: function(event) {
+          if (event.source !== window.parent || event.origin !== HostBridge.origin || !event.data) {
+            return;
+          }
+          switch (event.data.type) {
+            case 'augustus:pause':
+              HostBridge.setPaused(true);
+              break;
+            case 'augustus:resume':
+              HostBridge.setPaused(false);
+              break;
+            case 'augustus:focus':
+              window.focus();
+              canvasElement.focus();
+              break;
+            case 'augustus:flush':
+              FS.syncfs(false, function(err) {
+                HostBridge.send('flushed', { ok: !err });
+              });
+              break;
+          }
+        }
+      };
+      // Keeps SDL informed of every change of the canvas size. Resizing the page or the embedding frame already
+      // triggers a resize event, but browser zoom and monitor changes do not always do so.
+      function watchCanvasSize() {
+        if (window.ResizeObserver) {
+          new ResizeObserver(function() {
+            window.dispatchEvent(new Event('resize'));
+          }).observe(canvasElement);
+        }
+        var watchPixelRatio = function() {
+          var query = matchMedia('(resolution: ' + window.devicePixelRatio + 'dppx)');
+          query.addEventListener('change', function() {
+            window.dispatchEvent(new Event('resize'));
+            watchPixelRatio();
+          }, { once: true });
+        };
+        watchPixelRatio();
+      }
+      // Only one tab may use the game's browser storage at a time, or the saves could overwrite each other
+      function acquireGameLock(onAcquired, onBusy) {
+        if (!navigator.locks) {
+          onAcquired();
+          return;
+        }
+        navigator.locks.request('augustus-game-data', { ifAvailable: true }, function(lock) {
+          if (!lock) {
+            onBusy();
+            return;
+          }
+          onAcquired();
+          return new Promise(function() {}); // hold the lock until the page is closed
+        });
+      }
       var BrowserSupport = {
         hasZip: false,
         canDownloadSaves: false,
@@ -556,6 +744,7 @@
         showFirstScreen: function() {
           removeEventListeners();
           Module.showSubWindow(startOptionsElement);
+          HostBridge.send('state', { state: 'ready' });
         },
         monitorRunDependencies: function(left) {
           this.totalDependencies = Math.max(this.totalDependencies, left);
@@ -566,13 +755,27 @@
           }
         },
         onRuntimeInitialized: function() {
+          Module.runtimeReady = true;
           BrowserSupport.check();
           Module.createUploadMessage();
-
           if (!BrowserSupport.canDownloadSaves) {
             document.getElementById('downloadSaves').style.display = 'none';
           }
-          Module.startFS();
+          if (!HOSTED) {
+            document.getElementById('redownload').style.display = 'none';
+          }
+          watchCanvasSize();
+          canvasElement.addEventListener('pointerdown', function() {
+            window.focus();
+            canvasElement.focus();
+          });
+          HostBridge.init();
+          acquireGameLock(Module.startFS, function() {
+            Module.setStatus('Augustus is already open in another tab or window.<br><br>' +
+              'Close it and reload this page.');
+            spinnerElement.style.display = 'none';
+            HostBridge.send('state', { state: 'busy' });
+          });
         },
         startGame: function() {
           if (Module.running) {
@@ -580,6 +783,7 @@
           }
           Module.running = true;
           Module.setStatus("Starting...");
+          HostBridge.send('state', { state: 'running' });
           Module.callMain([C3Dir]);
           setTimeout(function() {
             if (Module.running) {
@@ -590,9 +794,10 @@
         quitGame: function(status) {
           Module.running = false;
           infoElement.style.display = 'flex';
+          HostBridge.send('state', { state: 'quit' });
           if (status) {
             Module.setStatus('The selected files are not a valid C3 installation<br><br>Deleting files...');
-            Module.clearPath(C3Dir);
+            Module.clearPath(C3Dir, true);
             FS.syncfs(false, function() {
               Module.setStatus('The selected files are not a valid C3 installation<br><br>' +
                 Module.addFilesMessage);
@@ -612,7 +817,12 @@
                 Module.handleFSError(err);
                 return;
               }
-              if (Object.keys(FS.lookupPath(C3Dir).node.contents).length === 0) {
+              if (Module.missingGameFiles().length > 0) {
+                if (HOSTED) {
+                  Module.downloadGameData();
+                  return;
+                }
+                HostBridge.send('state', { state: 'needs-data' });
                 if (!BrowserSupport.canUseDragDrop() && !BrowserSupport.canUseInput()) {
                   Module.setStatus("Your browser does not support any way to load the C3 files" +
                     "<br><br>Please use a more modern browser");
@@ -648,15 +858,222 @@
             Module.clearOSD();
           });                
         },
-        clearPath: function(path) {
+        // Deletes everything inside path. With keepSaves, the player's own files (saves, maps and settings)
+        // are left alone, so replacing the game data can never cost anyone their progress.
+        clearPath: function(path, keepSaves) {
           Object.keys(FS.lookupPath(path).node.contents).forEach(element => {
             var stat = FS.stat(path + '/' + element);
             if (stat.mode & 0o40000) {
-              Module.clearPath(path + '/' + element);
-              FS.rmdir(path + '/' + element);
-            } else {
+              Module.clearPath(path + '/' + element, keepSaves);
+              try {
+                FS.rmdir(path + '/' + element);
+              } catch (e) {
+                // The folder still holds files that were kept
+              }
+            } else if (!keepSaves || !hasExtension(element, PRESERVED_EXTENSIONS)) {
               FS.unlink(path + '/' + element);
             }
+          });
+        },
+        // Returns descriptions of the required game files that are missing from the game folder
+        missingGameFiles: function() {
+          var present = {};
+          Object.keys(FS.lookupPath(C3Dir).node.contents).forEach(function(name) {
+            present[name.toLowerCase()] = true;
+          });
+          return findMissing(present);
+        },
+        invalidDataMessage: function(missing) {
+          return 'The selected files are not a valid C3 installation<br><br>Missing: ' + missing.join(', ') +
+            '<br><br><small>Select the folder that directly contains c3.sg2</small>';
+        },
+        // Runs when all game files were copied into the game folder
+        afterImport: function() {
+          var missing = Module.missingGameFiles();
+          if (missing.length > 0) {
+            Module.clearPath(C3Dir, true);
+            FS.syncfs(false, function() {
+              Module.setStatus(Module.invalidDataMessage(missing) + '<br><br>' + Module.addFilesMessage);
+              addFileUploadEventListeners();
+            });
+            return;
+          }
+          removeUploadedFiles();
+          Module.startGame();
+        },
+        downloadGameData: function() {
+          Module.showSubWindow(loadStatusElement);
+          Module.setStatus('Checking game data...');
+          var failed = function(error) {
+            console.error(error);
+            Module.clearPath(C3Dir, true);
+            var message = 'Could not download the game data:<br><br>' +
+              (error && error.message ? error.message : error);
+            Module.setStatus(message + '<br><br>You can also ' +
+              Module.addFilesMessage.charAt(0).toLowerCase() + Module.addFilesMessage.substring(1));
+            addFileUploadEventListeners();
+          };
+          fetch(DATA_URL + 'manifest.json', { cache: 'no-store', credentials: 'same-origin' }).then(function(response) {
+            if (!response.ok) {
+              throw new Error('The game data store answered ' + response.status +
+                (response.status === 404 ? ' (no game data has been uploaded yet)' : ''));
+            }
+            return response.json();
+          }).then(function(manifest) {
+            var files = manifest.files || [];
+            var names = {};
+            files.forEach(function(file) {
+              if (file.path.indexOf('/') === -1) {
+                names[file.path.toLowerCase()] = true;
+              }
+            });
+            var missing = findMissing(names);
+            if (missing.length > 0) {
+              throw new Error('The game data store is incomplete. Missing: ' + missing.join(', '));
+            }
+            var totalBytes = files.reduce(function(sum, file) { return sum + file.size; }, 0);
+            var totalMB = Math.max(Math.round(totalBytes / 1048576), 1);
+            var doneBytes = 0;
+            var downloadFile = function(file) {
+              var url = DATA_URL + file.path.split('/').map(encodeURIComponent).join('/');
+              return fetch(url, { credentials: 'same-origin' }).then(function(response) {
+                if (!response.ok) {
+                  throw new Error(file.path + ': ' + response.status);
+                }
+                var buffer = new Uint8Array(file.size);
+                var received = 0;
+                var finish = function() {
+                  if (received !== file.size) {
+                    throw new Error(file.path + ': size mismatch');
+                  }
+                  ensureDirs(file.path);
+                  FS.writeFile(C3Dir + '/' + file.path, buffer, { encoding: 'binary' });
+                  doneBytes += file.size;
+                };
+                if (!response.body || !response.body.getReader) {
+                  return response.arrayBuffer().then(function(data) {
+                    if (data.byteLength !== file.size) {
+                      throw new Error(file.path + ': size mismatch');
+                    }
+                    buffer.set(new Uint8Array(data));
+                    received = data.byteLength;
+                    finish();
+                  });
+                }
+                var reader = response.body.getReader();
+                var pump = function() {
+                  return reader.read().then(function(result) {
+                    if (result.done) {
+                      return finish();
+                    }
+                    if (received + result.value.length > file.size) {
+                      throw new Error(file.path + ': size mismatch');
+                    }
+                    buffer.set(result.value, received);
+                    received += result.value.length;
+                    Module.setStatus('Downloading game data... (' +
+                      Math.round((doneBytes + received) / 1048576) + '/' + totalMB + ')');
+                    return pump();
+                  });
+                };
+                return pump();
+              });
+            };
+            var index = 0;
+            var next = function() {
+              if (index >= files.length) {
+                return Promise.resolve();
+              }
+              return downloadFile(files[index++]).then(next);
+            };
+            Module.setStatus('Downloading game data... (0/' + totalMB + ')');
+            return next();
+          }).then(function() {
+            Module.setStatus('Syncing filesystem, please wait...');
+            FS.syncfs(false, function(err) {
+              if (err) {
+                failed(err);
+                return;
+              }
+              Module.afterImport();
+            });
+          }).catch(failed);
+        },
+        redownloadGameData: function() {
+          if (Module.running) {
+            return;
+          }
+          Module.setStatus('Removing old game data...');
+          Module.clearPath(C3Dir, true);
+          FS.syncfs(false, function() {
+            Module.downloadGameData();
+          });
+        },
+        clickImportSaves: function() {
+          if (!Module.running) {
+            saveInputElement.click();
+          }
+        },
+        importSaveFiles: function(files) {
+          var pending = [];
+          var jobs = [];
+          Array.prototype.forEach.call(files, function(file) {
+            if (file.name.toLowerCase().endsWith('.zip') && BrowserSupport.canLoadZip) {
+              jobs.push(JSZip.loadAsync(file).then(function(zip) {
+                var reads = [];
+                zip.forEach(function(path, entry) {
+                  var name = path.substring(path.lastIndexOf('/') + 1);
+                  if (!entry.dir && hasExtension(name, SAVE_EXTENSIONS)) {
+                    reads.push(entry.async('uint8array').then(function(data) {
+                      pending.push({ name: name, data: data });
+                    }));
+                  }
+                });
+                return Promise.all(reads);
+              }));
+            } else if (hasExtension(file.name, SAVE_EXTENSIONS)) {
+              jobs.push(file.arrayBuffer().then(function(data) {
+                pending.push({ name: file.name, data: new Uint8Array(data) });
+              }));
+            }
+          });
+          Module.setStatus('Reading save files...');
+          Promise.all(jobs).then(function() {
+            if (pending.length === 0) {
+              throw new Error('No save files (.sav, .svx or .map) found in the selected files');
+            }
+            var existing = Object.keys(FS.lookupPath(C3Dir).node.contents).map(function(name) {
+              return name.toLowerCase();
+            });
+            var overwritten = pending.filter(function(save) {
+              return existing.indexOf(save.name.toLowerCase()) !== -1;
+            });
+            if (overwritten.length > 0 && !confirm('This replaces ' + overwritten.length +
+              ' existing file(s) with the same name. Continue?')) {
+              return false;
+            }
+            pending.forEach(function(save) {
+              FS.writeFile(C3Dir + '/' + save.name, save.data, { encoding: 'binary' });
+            });
+            return true;
+          }).then(function(imported) {
+            saveInputElement.value = null;
+            if (!imported) {
+              Module.showFirstScreen();
+              return;
+            }
+            Module.setStatus('Syncing filesystem, please wait...');
+            FS.syncfs(false, function() {
+              Module.setStatus('Imported ' + pending.length + ' save file(s)<br><br>' +
+                '<small>(Click to exit this prompt)</small>');
+              addInfoElementClickEvent(clickShowMainWindow);
+            });
+          }).catch(function(error) {
+            saveInputElement.value = null;
+            Module.setStatus('Could not import the saves:<br><br>' +
+              (error && error.message ? error.message : error) +
+              '<br><br><small>(Click to exit this prompt)</small>');
+            addInfoElementClickEvent(clickShowMainWindow);
           });
         },
         clearFS: function() {
@@ -730,8 +1147,7 @@
               if (filesRead == totalFiles) {
                 Module.setStatus("Syncing filesystem, please wait...");
                 FS.syncfs(false, function(err) {
-                  removeUploadedFiles();
-                  Module.startGame();
+                  Module.afterImport();
                 });
               }
             };
@@ -791,8 +1207,7 @@
                   if (filesRead === totalFiles) {
                     Module.setStatus("Syncing filesystem, please wait...");
                     FS.syncfs(false, function(err) {
-                      removeUploadedFiles();
-                      Module.startGame();
+                      Module.afterImport();
                     });
                   }
                 }, function(e) {
@@ -816,7 +1231,7 @@
         },
         loadDirFromInput: function(files) {
           Module.setStatus("Clearing old contents...");
-          Module.clearPath(C3Dir);
+          Module.clearPath(C3Dir, true);
           filesRead = 0;
           totalFiles = files.length;
           Module.setStatus("Preparing file load...");
@@ -867,7 +1282,7 @@
         },
         loadDirFromDropTarget: function(dataTransfer) {
           Module.setStatus("Clearing old contents...");
-          Module.clearPath(C3Dir);
+          Module.clearPath(C3Dir, true);
 
           filesRead = 0;
           totalFiles = 0;
