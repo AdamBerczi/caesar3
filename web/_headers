@@ -1,0 +1,5 @@
+/*
+  Cache-Control: public, no-cache
+  Content-Security-Policy: frame-ancestors 'self' https://*.adam-berczi.workers.dev http://localhost:* http://127.0.0.1:*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin

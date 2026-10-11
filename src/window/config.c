@@ -2316,6 +2316,11 @@ static void init(unsigned int page, unsigned int category, int show_background_i
         disable_widget_globally(TYPE_NUMERICAL_RANGE, RANGE_DISPLAY_SCALE);
         disable_widget_globally(TYPE_CHECKBOX, CONFIG_ORIGINAL_FULLSCREEN);
     }
+#ifdef __EMSCRIPTEN__
+    // The browser page decides the window size, so a fixed windowed resolution makes no sense
+    disable_widget_globally(TYPE_NUMERICAL_DESC, RANGE_RESOLUTION);
+    disable_widget_globally(TYPE_NUMERICAL_RANGE, RANGE_RESOLUTION);
+#endif
 
     init_list_boxes();
 }

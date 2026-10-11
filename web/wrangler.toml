@@ -1,0 +1,23 @@
+# Cloudflare Worker that hosts the Augustus web build. Deployed from .github/workflows/web.yml.
+name = "augustus"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[assets]
+# Filled by the workflow with the Emscripten build output (see web/README.md)
+directory = "./dist"
+binding = "ASSETS"
+# The game data route is answered by the Worker, never by a static file
+run_worker_first = [ "/c3data/*" ]
+
+# Private bucket with the owner's Caesar III files under the c3/ prefix
+[[r2_buckets]]
+binding = "C3_DATA"
+bucket_name = "augustus-c3-data"
+
+[vars]
+# The game data is only served to requests carrying a valid Cloudflare Access login for this application.
+# Fill both in once the Access application exists (Zero Trust > Access > Applications). Until then the data
+# route answers 503 and the page falls back to selecting the game folder manually.
+ACCESS_TEAM_DOMAIN = ""   # for example "yourteam.cloudflareaccess.com"
+ACCESS_AUD = ""           # the application's "Application Audience (AUD) Tag"

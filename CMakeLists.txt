@@ -15,6 +15,8 @@ option(DRAW_HIGHWAY_TERRAIN "Draw highway debug information." OFF)
 option(DRAW_ROAD_NETWORK_IDS "Draw road network IDs for debugging." OFF)
 option(DRAW_TILE_COORDS "Draw tile coordinates." OFF)
 option(AV1_VIDEO_SUPPORT "Enable AV1 video support." OFF)
+set(AUGUSTUS_SOURCE_URL "https://github.com/Keriew/augustus" CACHE STRING "Emscripten only: where the source code of this build can be found, shown on the page as the AGPL requires for modified versions served over a network.")
+option(EMSCRIPTEN_HOSTED "Emscripten only: build separate html/js/wasm/data files for a site that serves the game data itself, instead of one self-contained html file." OFF)
 
 if(${TARGET_PLATFORM} STREQUAL "vita" AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     if(DEFINED ENV{VITASDK})
@@ -200,6 +202,12 @@ endif()
 configure_file(${PROJECT_SOURCE_DIR}/gen/version.c.in ${PROJECT_SOURCE_DIR}/src/platform/version.c)
 configure_file(${PROJECT_SOURCE_DIR}/gen/version.rc.in ${PROJECT_SOURCE_DIR}/res/version.rc)
 configure_file(${PROJECT_SOURCE_DIR}/gen/version.txt.in ${PROJECT_SOURCE_DIR}/res/version.txt)
+
+if(EMSCRIPTEN_HOSTED)
+    set(EMSCRIPTEN_HOSTED_JS "true")
+else()
+    set(EMSCRIPTEN_HOSTED_JS "false")
+endif()
 
 if(${TARGET_PLATFORM} STREQUAL "emscripten")
     configure_file(${PROJECT_SOURCE_DIR}/gen/shell.html.in ${PROJECT_SOURCE_DIR}/res/shell.html)
@@ -912,13 +920,21 @@ endif()
 
 if(${TARGET_PLATFORM} STREQUAL "emscripten")
     set(CMAKE_EXECUTABLE_SUFFIX .html)
+    if(EMSCRIPTEN_HOSTED)
+        # Separate files, so that every file stays small enough for static hosting and can be cached on its own
+        set(EMSCRIPTEN_OUTPUT_FLAGS "--preload-file ${ASSETS_DIR}@/assets")
+    else()
+        set(EMSCRIPTEN_OUTPUT_FLAGS "-s SINGLE_FILE=1 -s SINGLE_FILE_BINARY_ENCODE=0 --embed-file ${ASSETS_DIR}@/assets")
+    endif()
     set(EMSCRIPTEN_LINK_FLAGS
-        "-lidbfs.js -s SINGLE_FILE=1 -s SINGLE_FILE_BINARY_ENCODE=0 --shell-file ${PROJECT_SOURCE_DIR}/res/shell.html --embed-file ${ASSETS_DIR}@/assets -s INITIAL_MEMORY=268435456 -s ALLOW_MEMORY_GROWTH=1 -s INVOKE_RUN=0 -s EXPORTED_FUNCTIONS=[\"_main\"] -s EXPORTED_RUNTIME_METHODS=[\"callMain\",\"FS\"] -s DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[\"$autoResumeAudioContext\"] --bind"
+        "-lidbfs.js ${EMSCRIPTEN_OUTPUT_FLAGS} --shell-file ${PROJECT_SOURCE_DIR}/res/shell.html -s INITIAL_MEMORY=268435456 -s ALLOW_MEMORY_GROWTH=1 -s INVOKE_RUN=0 -s EXPORTED_FUNCTIONS=[\"_main\",\"_augustus_host_set_paused\"] -s EXPORTED_RUNTIME_METHODS=[\"callMain\",\"FS\",\"ccall\"] -s DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[\"$autoResumeAudioContext\"] --bind"
     )
     if("${CMAKE_BUILD_TYPE}" MATCHES "Debug")
         set(EMSCRIPTEN_LINK_FLAGS "${EMSCRIPTEN_LINK_FLAGS} -s ASSERTIONS=1")
     endif()
     set_target_properties(${SHORT_NAME} PROPERTIES LINK_FLAGS "${EMSCRIPTEN_LINK_FLAGS}")
+    # The page template is part of the output, relink when it changes
+    set_property(TARGET ${SHORT_NAME} APPEND PROPERTY LINK_DEPENDS ${PROJECT_SOURCE_DIR}/res/shell.html)
 endif()
 
 if(MSVC)

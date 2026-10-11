@@ -1,0 +1,92 @@
+name: Web build (Cloudflare)
+
+# Builds the hosted browser version and, on the main branch, deploys it to Cloudflare Workers.
+# See web/README.md for the one-time setup (secrets, R2 bucket, Cloudflare Access).
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'src/**'
+      - 'res/**'
+      - 'gen/**'
+      - 'ext/**'
+      - 'CMakeLists.txt'
+      - 'web/**'
+      - '.github/workflows/web.yml'
+  pull_request:
+    paths:
+      - 'src/platform/**'
+      - 'gen/shell.html.in'
+      - 'CMakeLists.txt'
+      - 'web/**'
+      - '.github/workflows/web.yml'
+  workflow_dispatch:
+
+env:
+  EMSDK_VERSION: 5.0.6
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+jobs:
+  web:
+    name: Build and deploy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Test the Worker
+        run: node --test web/worker.test.mjs
+
+      - name: Cache Emscripten
+        uses: actions/cache@v4
+        with:
+          path: emsdk
+          key: emsdk-${{ env.EMSDK_VERSION }}
+
+      - name: Set up Emscripten
+        run: |
+          [ -d emsdk ] || git clone --depth 1 https://github.com/emscripten-core/emsdk.git
+          cd emsdk
+          ./emsdk install "$EMSDK_VERSION"
+          ./emsdk activate "$EMSDK_VERSION"
+
+      - name: Pack Augustus assets
+        run: ./.ci_scripts/pack_assets.sh
+
+      - name: Build
+        run: |
+          export EMSDK="$PWD/emsdk"
+          source "$EMSDK/emsdk_env.sh"
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release -DTARGET_PLATFORM=emscripten -DEMSCRIPTEN_HOSTED=ON \
+            -DAUGUSTUS_SOURCE_URL="https://github.com/${{ github.repository }}" ..
+          make -j4
+
+      - name: Assemble the site
+        run: |
+          mkdir -p web/dist
+          cp build/augustus.html web/dist/index.html
+          cp build/augustus.js build/augustus.wasm build/augustus.data web/dist/
+          cp web/_headers web/dist/_headers
+          # Cloudflare serves every static file up to 25 MiB
+          find web/dist -type f -size +25M -print -exec false {} +
+          ls -l web/dist
+
+      - name: Deploy
+        # Only on the main branch, and only once the repository secrets exist
+        if: github.event_name != 'pull_request' && env.CLOUDFLARE_API_TOKEN != ''
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: web
+          command: deploy
+
+      - name: Upload the site as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: augustus-web
+          path: web/dist/
