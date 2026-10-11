@@ -19,5 +19,5 @@ bucket_name = "augustus-c3-data"
 # The game data is only served to requests carrying a valid Cloudflare Access login for this application.
 # Fill both in once the Access application exists (Zero Trust > Access > Applications). Until then the data
 # route answers 503 and the page falls back to selecting the game folder manually.
-ACCESS_TEAM_DOMAIN = ""   # for example "yourteam.cloudflareaccess.com"
-ACCESS_AUD = ""           # the application's "Application Audience (AUD) Tag"
+ACCESS_TEAM_DOMAIN = "spring-cell-55b0.cloudflareaccess.com"   # for example "yourteam.cloudflareaccess.com"
+ACCESS_AUD = "509efef04cefd7e7c5823ca0985dcb1816c47c0c7a57b56796b0ab6229f78269"           # the application's "Application Audience (AUD) Tag"
