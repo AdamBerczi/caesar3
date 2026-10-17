@@ -986,7 +986,10 @@ static void draw_pond(const map_tile *tile, int x, int y, int type)
 static void draw_bridge(const map_tile *tile, int x, int y, building_type type)
 {
     int length, direction;
-    grid_slice blocked_tiles = { .size = 0 };
+    // A grid_slice is larger than the default WASM stack. Preview drawing is
+    // single-threaded; keep the scratch buffer off the stack and reset its count.
+    static grid_slice blocked_tiles;
+    blocked_tiles.size = 0;
     int end_grid_offset = map_bridge_calculate_length_direction(tile->x, tile->y, &length, &direction, &blocked_tiles);
 
     int dir = direction - city_view_orientation();

@@ -7,10 +7,10 @@ compatibility_date = "2025-01-01"
 # Filled by the workflow with the Emscripten build output (see web/README.md)
 directory = "./dist"
 binding = "ASSETS"
-# The game data route is answered by the Worker, never by a static file
-run_worker_first = [ "/c3data/*" ]
+# The game data and cloud save routes are answered by the Worker, never by a static file
+run_worker_first = [ "/c3data/*", "/cloud/*" ]
 
-# Private bucket with the owner's Caesar III files under the c3/ prefix
+# Private bucket with the owner's Caesar III files under the c3/ prefix, and each player's cloud saves under saves/
 [[r2_buckets]]
 binding = "C3_DATA"
 bucket_name = "augustus-c3-data"

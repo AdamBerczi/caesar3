@@ -3,8 +3,10 @@
 // The static build (html, js, wasm, packed Augustus assets) comes from the assets binding. The original Caesar III
 // files are proprietary: they live in a private R2 bucket and are only handed out to requests that carry a valid
 // Cloudflare Access login for this application. Nothing in this repository or in the build contains game data.
+// The same login also keys each player's cloud saves (/cloud/saves, see saves.js), stored in the same bucket.
 
-import { verifyAccessRequest } from "./access.js";
+import { verifyAccessIdentity } from "./access.js";
+import { SAVES_PREFIX, handleSaves } from "./saves.js";
 
 const DATA_PREFIX = "/c3data/";
 const BUCKET_PREFIX = "c3/";
@@ -14,15 +16,16 @@ function text(status, body) {
     return new Response(body + "\n", { status, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
+// Returns { identity } for a signed-in request, or { denied: Response }
 async function authorize(request, env) {
     if (env.ALLOW_PUBLIC_DATA === "true") {
-        return null;
+        return { identity: { email: "local-dev" } };
     }
     if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) {
-        return text(503, "Game data is disabled until ACCESS_TEAM_DOMAIN and ACCESS_AUD are configured, see web/README.md");
+        return { denied: text(503, "Game data is disabled until ACCESS_TEAM_DOMAIN and ACCESS_AUD are configured, see web/README.md") };
     }
-    const allowed = await verifyAccessRequest(request, { team: env.ACCESS_TEAM_DOMAIN, audience: env.ACCESS_AUD });
-    return allowed ? null : text(403, "Sign in through Cloudflare Access to download the game data");
+    const identity = await verifyAccessIdentity(request, { team: env.ACCESS_TEAM_DOMAIN, audience: env.ACCESS_AUD });
+    return identity ? { identity } : { denied: text(403, "Sign in through Cloudflare Access to use the game data and cloud saves") };
 }
 
 async function manifest(env) {
@@ -70,15 +73,24 @@ async function gameFile(request, env, pathname) {
 export default {
     async fetch(request, env) {
         const url = new URL(request.url);
-        if (!url.pathname.startsWith(DATA_PREFIX)) {
+        const isSaves = url.pathname === SAVES_PREFIX || url.pathname.startsWith(SAVES_PREFIX + "/");
+        if (!url.pathname.startsWith(DATA_PREFIX) && !isSaves) {
             return env.ASSETS.fetch(request);
         }
-        if (request.method !== "GET" && request.method !== "HEAD") {
+        if (!isSaves && request.method !== "GET" && request.method !== "HEAD") {
             return text(405, "Method not allowed");
         }
-        const denied = await authorize(request, env);
+        const { identity, denied } = await authorize(request, env);
         if (denied) {
             return denied;
+        }
+        if (isSaves) {
+            try {
+                return await handleSaves(request, env, identity, url.pathname);
+            } catch (error) {
+                console.error(error);
+                return text(502, "Cloud save storage failed, the browser keeps its copy and retries");
+            }
         }
         return url.pathname === MANIFEST_PATH ? manifest(env) : gameFile(request, env, url.pathname);
     }
